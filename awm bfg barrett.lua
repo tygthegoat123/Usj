@@ -32,6 +32,20 @@ local CFG = {
 
 local GUNS = {
 	{
+		name = "Steyr Scout", modelId = 4669075272, bolt = true, boltTime = 1.0,
+		mag = 5, delay = 1.2, reloadTime = 2.2, scopeFOV = 12,
+		pitch = 1, volume = 1.3, kick = 2, damage = 100,
+		tracerColor = Color3.fromRGB(255, 225, 140), tracerWidth = 0.09,
+		autoOrient = true,
+		flipModel = true,     -- set false if it points backwards
+		boltTravel = 0.9,     -- studs the bolt slides back
+		boltRot = 70,         -- degrees the bolt handle lifts/turns
+		vmOffset = Vector3.new(0.95, -0.8, -2.6),
+		muzzleZ = 2.5,
+		aimOffset = Vector3.new(0, -0.3, -2.2),
+		rHand = Vector3.new(0.05, -0.55, 0.6), lHand = Vector3.new(0, -0.45, -1.1),
+	},
+	{
 		name = "AWM", modelId = 8187212887, bolt = true, boltTime = 0.9,
 		mag = 5, delay = 1.4, reloadTime = 1.6, scopeFOV = 10,
 		pitch = 1, volume = 1.2, kick = 1.5, damage = 100,
@@ -287,10 +301,8 @@ local function finalize(g, parts, main, src)
 	g.rotInv = rot:Inverse()
 	g.ammo = g.mag
 
-	-- floating viewmodel (clones, positioned every frame)
-	local vm = Instance.new("Model")
-	vm.Name = g.name .. "_VM"
-	g.vmRel = {}
+		g.vmRel = {}
+	local cloneOf = {}
 	for _, p in ipairs(parts) do
 		local c = p:Clone()
 		for _, ch in ipairs(c:GetChildren()) do
@@ -302,53 +314,23 @@ local function finalize(g, parts, main, src)
 		c.CanTouch = false
 		c.Parent = vm
 		g.vmRel[c] = rel[p]
+		cloneOf[p] = c
 		if p == main then g.vmHandle = c end
 	end
-	-- blocky hands + forearms (positioned every frame)
-	local function hp(name, size)
-		local h = Instance.new("Part")
-		h.Name = name
-		h.Size = size
-		h.Anchored = true
-		h.CanCollide = false
-		h.CanQuery = false
-		h.CanTouch = false
-		h.Material = Enum.Material.SmoothPlastic
-		h.Color = Color3.fromRGB(234, 184, 146)
-		h.TopSurface = Enum.SurfaceType.Smooth
-		h.BottomSurface = Enum.SurfaceType.Smooth
-		h.Parent = vm
-		return h
+	g.vmBolts, g.vmMags = {}, {}
+	for _, p in ipairs(parts) do
+		if p ~= main then
+			local n = p.Name:lower()
+			if n:find("^bolt") then
+				table.insert(g.vmBolts, { part = cloneOf[p], rel = rel[p] })
+			elseif n:find("^mag") then
+				table.insert(g.vmMags, { part = cloneOf[p], rel = rel[p] })
+			end
+		end
 	end
-	g.hands = {
-		rHand = hp("RHand", Vector3.new(0.42, 0.42, 0.5)),
-		rArm  = hp("RArm",  Vector3.new(0.38, 0.38, 1)),
-		lHand = hp("LHand", Vector3.new(0.42, 0.42, 0.5)),
-		lArm  = hp("LArm",  Vector3.new(0.38, 0.38, 1)),
-	}
-	g.vm = vm
-	table.insert(extras, vm)
-end
+	if #g.vmBolts == 0 then g.vmBolts = nil end
+	if #g.vmMags == 0 then g.vmMags = nil end
 
-for _, g in ipairs(GUNS) do
-	local parts, main, src
-	if g.modelId then
-		parts, main, src = loadModelParts(g.modelId)
-	else
-		parts, main = buildBFGParts()
-	end
-	if parts then
-		finalize(g, parts, main, src)
-	else
-		warn("[Gun] Failed to build " .. g.name)
-	end
-end
-
--- drop guns that failed to build
-for i = #GUNS, 1, -1 do
-	if not GUNS[i].tool then table.remove(GUNS, i) end
-end
-if #GUNS == 0 then return end
 
 ----------------------------------------------------------------
 -- STATE
@@ -356,6 +338,7 @@ if #GUNS == 0 then return end
 local cur = nil
 local scoped, reloading = false, false
 local reloadId = 0
+local reloadT0 = 0
 local lastShot = 0
 local baseFOV = 70
 local holdTrack, reloadTrack, aimTrack
@@ -636,7 +619,7 @@ local function reload()
 	if not g or reloading or g.ammo >= g.mag then return end
 	reloading = true
 	reloadId += 1
-	local id = reloadId
+	local id = reloadId reloadT0 = os.clock()
 	setScope(false)
 	updateAmmo()
 	local soundId = g.reloadSound or RELOAD_SOUND
@@ -887,10 +870,48 @@ RS:BindToRenderStep("SteyrViewmodel", Enum.RenderPriority.Camera.Value + 1, func
 		for p, rel in pairs(g.vmRel) do
 			p.CFrame = base * rel
 		end
+		-- bolt pull animation (Bolt part): lift handle, slide back, push forward, lock
+		if g.vmBolts then
+			local pull, rot = 0, 0
+			if bolting then
+				local a = math.clamp((os.clock() - boltT0) / boltDur, 0, 1)
+				rot = a < 0.2 and a / 0.2 or (a < 0.9 and 1 or (1 - a) / 0.1)
+				if a < 0.2 then pull = 0
+				elseif a < 0.5 then pull = (a - 0.2) / 0.3
+				elseif a < 0.6 then pull = 1
+				elseif a < 0.9 then pull = 1 - (a - 0.6) / 0.3
+				end
+				pull = pull * pull * (3 - 2 * pull)
+			end
+			for _, b in ipairs(g.vmBolts) do
+				local bw = baseF * CFrame.new(0, 0, (g.boltTravel or 0.8) * pull) * g.rotInv * b.rel
+				local axis = bw:VectorToObjectSpace(baseF.LookVector)
+				b.part.CFrame = bw * CFrame.fromAxisAngle(axis, math.rad(g.boltRot or 60) * rot)
+			end
+		end
+
+		-- reload animation (Mag part): left hand pulls mag out, swaps, slams it back in
+		local MAG_OUT = Vector3.new(-0.25, -0.9, 0.8)
+		local magM = 0
+		if reloading and g.vmMags then
+			local pr = math.clamp((os.clock() - reloadT0) / g.reloadTime, 0, 1)
+			if pr < 0.2 then magM = 0
+			elseif pr < 0.45 then magM = (pr - 0.2) / 0.25
+			elseif pr < 0.6 then magM = 1
+			elseif pr < 0.85 then magM = 1 - (pr - 0.6) / 0.25
+			end
+			magM = magM * magM * (3 - 2 * magM)
+		end
+		if g.vmMags then
+			for _, m in ipairs(g.vmMags) do
+				m.part.CFrame = baseF * CFrame.new(MAG_OUT * magM) * g.rotInv * m.rel
+			end
+		end
 
 		-- hands (left hand drops away to the mag while reloading)
 		local rPos = g.rHand + Vector3.new(0.25, 0.3, 0.6) * bp
-		local lPos = g.lHand + Vector3.new(-0.25, -0.9, 0.8) * reloadAlpha
+				local lPos = g.vmMags and (g.lHand + MAG_OUT * magM)
+			or (g.lHand + Vector3.new(-0.25, -0.9, 0.8) * reloadAlpha)
 		local H = g.hands
 		local rW = baseF * CFrame.new(rPos)
 		local lW = baseF * CFrame.new(lPos)
